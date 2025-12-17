@@ -62,8 +62,8 @@ impl RaymarchParams {
                 water.count(),
                 0,
             ),
-            water_bounds_min_radius: water.bounds_min.extend(water.radius),
-            water_bounds_max_pad: water.bounds_max.extend(0.0),
+            water_bounds_min_radius: water.render_bounds_min.extend(water.radius),
+            water_bounds_max_pad: water.render_bounds_max.extend(0.0),
             resolution_pad: Vec4::new(
                 window.resolution.width(),
                 window.resolution.height(),
@@ -98,8 +98,8 @@ impl RaymarchParams {
 
     pub fn set_water(&mut self, water: &WaterParticles) {
         self.root_depth_watercount_pad.z = water.count();
-        self.water_bounds_min_radius = water.bounds_min.extend(water.radius);
-        self.water_bounds_max_pad = water.bounds_max.extend(0.0);
+        self.water_bounds_min_radius = water.render_bounds_min.extend(water.radius);
+        self.water_bounds_max_pad = water.render_bounds_max.extend(0.0);
         self.water_particles = water.packed_positions();
     }
 }

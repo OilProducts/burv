@@ -138,6 +138,12 @@ fn terrain_shadow(p: vec3<f32>, n: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     return 1.0;
 }
 
+fn smin(a: f32, b: f32, k: f32) -> f32 {
+    // Polynomial smooth-min (IQ). Produces a value <= min(a, b), so it's safe for sphere tracing.
+    let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+
 fn water_sdf(p: vec3<f32>) -> f32 {
     let bmin = params.water_bounds_min_radius.xyz;
     let bmax = params.water_bounds_max_pad.xyz;
@@ -147,13 +153,14 @@ fn water_sdf(p: vec3<f32>) -> f32 {
 
     let r = params.water_bounds_min_radius.w;
     let count = params.root_depth_watercount_pad.z;
+    let k = max(r * 0.65, 1.0e-4);
     var d = 1.0e9;
     for (var i: u32 = 0u; i < MAX_WATER_PARTICLES; i = i + 1u) {
         if i >= count {
             break;
         }
         let c = params.water_particles[i].xyz;
-        d = min(d, length(p - c) - r);
+        d = smin(d, length(p - c) - r, k);
     }
     return d;
 }
@@ -249,13 +256,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
         let p = ro + rd * t;
 
-        let d_water = water_sdf(p);
-        if d_water < SURFACE_EPS {
-            hit_kind = 2u;
-            hit_pos = p;
-            break;
-        }
-
         if in_bounds(p, world_min, world_max) {
             let leaf = query_leaf(p);
             if leaf.kind == NODE_KIND_SOLID {
@@ -277,12 +277,25 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                 break;
             }
 
+            let d_water = water_sdf(p);
+            if d_water < SURFACE_EPS {
+                hit_kind = 2u;
+                hit_pos = p;
+                break;
+            }
+
             let exit_d = ray_exit_distance(p, rd, leaf.min, leaf.min + vec3<f32>(leaf.size));
             let step_len = min(exit_d, d_water);
             t_prev = t;
             t += max(step_len, SURFACE_EPS);
         } else {
             // Outside the voxel world: only march water (it's bounded, so this will usually just escape).
+            let d_water = water_sdf(p);
+            if d_water < SURFACE_EPS {
+                hit_kind = 2u;
+                hit_pos = p;
+                break;
+            }
             t_prev = t;
             t += max(d_water, 1.0);
         }
