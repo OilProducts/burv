@@ -50,7 +50,9 @@ pub fn fps_camera_input_system(
     mut camera: ResMut<FpsCamera>,
     mut primary_window: Query<&mut Window, With<PrimaryWindow>>,
 ) {
-    let mut window = primary_window.single_mut();
+    let Ok(mut window) = primary_window.get_single_mut() else {
+        return;
+    };
 
     if keyboard.just_pressed(KeyCode::Escape) {
         camera.mouse_captured = false;

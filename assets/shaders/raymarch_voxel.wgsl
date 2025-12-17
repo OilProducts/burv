@@ -8,6 +8,12 @@ const MAX_STEPS: u32 = 160u;
 const MAX_DIST: f32 = 240.0;
 const SURFACE_EPS: f32 = 0.012;
 
+const MAX_SHADOW_STEPS: u32 = 96u;
+const SHADOW_BIAS: f32 = 0.08;
+
+const FOG_DENSITY_TERRAIN: f32 = 0.003;
+const FOG_DENSITY_WATER: f32 = 0.004;
+
 const MAX_WATER_PARTICLES: u32 = 128u;
 
 struct Params {
@@ -106,6 +112,32 @@ fn ray_exit_distance(p: vec3<f32>, rd: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f3
     return max(t_exit, 0.0);
 }
 
+fn terrain_shadow(p: vec3<f32>, n: vec3<f32>, light_dir: vec3<f32>) -> f32 {
+    let world_min = params.world_min_size.xyz;
+    let world_max = world_min + vec3<f32>(params.world_min_size.w);
+
+    var pos = p + n * SHADOW_BIAS;
+    if !in_bounds(pos, world_min, world_max) {
+        return 1.0;
+    }
+
+    for (var step: u32 = 0u; step < MAX_SHADOW_STEPS; step = step + 1u) {
+        if !in_bounds(pos, world_min, world_max) {
+            break;
+        }
+
+        let leaf = query_leaf(pos);
+        if leaf.kind == NODE_KIND_SOLID {
+            return 0.0;
+        }
+
+        let exit_d = ray_exit_distance(pos, light_dir, leaf.min, leaf.min + vec3<f32>(leaf.size));
+        pos = pos + light_dir * max(exit_d, SURFACE_EPS);
+    }
+
+    return 1.0;
+}
+
 fn water_sdf(p: vec3<f32>) -> f32 {
     let bmin = params.water_bounds_min_radius.xyz;
     let bmax = params.water_bounds_max_pad.xyz;
@@ -138,9 +170,11 @@ fn terrain_occ(p: vec3<f32>) -> f32 {
 
 fn terrain_normal(p: vec3<f32>) -> vec3<f32> {
     let e = 0.25;
-    let nx = terrain_occ(p + vec3<f32>(e, 0.0, 0.0)) - terrain_occ(p - vec3<f32>(e, 0.0, 0.0));
-    let ny = terrain_occ(p + vec3<f32>(0.0, e, 0.0)) - terrain_occ(p - vec3<f32>(0.0, e, 0.0));
-    let nz = terrain_occ(p + vec3<f32>(0.0, 0.0, e)) - terrain_occ(p - vec3<f32>(0.0, 0.0, e));
+    // `terrain_occ` is 1.0 inside solid and 0.0 outside, so its gradient points inward.
+    // Negate it to get an outward-facing surface normal.
+    let nx = terrain_occ(p - vec3<f32>(e, 0.0, 0.0)) - terrain_occ(p + vec3<f32>(e, 0.0, 0.0));
+    let ny = terrain_occ(p - vec3<f32>(0.0, e, 0.0)) - terrain_occ(p + vec3<f32>(0.0, e, 0.0));
+    let nz = terrain_occ(p - vec3<f32>(0.0, 0.0, e)) - terrain_occ(p + vec3<f32>(0.0, 0.0, e));
     let n = vec3<f32>(nx, ny, nz);
     if length(n) < 0.001 {
         return vec3<f32>(0.0, 1.0, 0.0);
@@ -228,7 +262,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Binary search back to the boundary for a cleaner surface hit.
                 var a = t_prev;
                 var b = t;
-                for (var i: u32 = 0u; i < 6u; i = i + 1u) {
+                for (var i: u32 = 0u; i < 10u; i = i + 1u) {
                     let m = 0.5 * (a + b);
                     if query_leaf(ro + rd * m).kind == NODE_KIND_SOLID {
                         b = m;
@@ -236,7 +270,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                         a = m;
                     }
                 }
-                t = b;
+                // Use the "outside" point so normal estimation + shadow rays don't start inside solid.
+                t = a;
                 hit_kind = 1u;
                 hit_pos = ro + rd * t;
                 break;
@@ -258,21 +293,31 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     if hit_kind == 1u {
         let n = terrain_normal(hit_pos);
-        let diff = max(dot(n, sun_dir), 0.0);
+        let ndotl = dot(n, sun_dir);
+        var shadow = 1.0;
+        if ndotl > 0.0 {
+            shadow = terrain_shadow(hit_pos, n, sun_dir);
+        }
+        let diff = max(ndotl, 0.0) * shadow;
         let base = terrain_color(hit_pos, n);
         let ambient = 0.22;
         let lit = base * (ambient + diff * 0.95);
-        let fog = 1.0 - exp(-t * 0.012);
+        let fog = 1.0 - exp(-t * FOG_DENSITY_TERRAIN);
         col = mix(lit, col, fog);
     } else if hit_kind == 2u {
         let n = water_normal(hit_pos);
-        let diff = max(dot(n, sun_dir), 0.0);
+        let ndotl = dot(n, sun_dir);
+        var shadow = 1.0;
+        if ndotl > 0.0 {
+            shadow = terrain_shadow(hit_pos, n, sun_dir);
+        }
+        let diff = max(ndotl, 0.0) * shadow;
         let refl = sky(reflect(rd, n));
         let water_col = vec3<f32>(0.04, 0.22, 0.33);
         let fres = pow(1.0 - max(dot(-rd, n), 0.0), 5.0);
-        let spec = pow(max(dot(reflect(-sun_dir, n), -rd), 0.0), 96.0);
+        let spec = pow(max(dot(reflect(-sun_dir, n), -rd), 0.0), 96.0) * shadow;
         let lit = mix(water_col * (0.30 + 0.70 * diff), refl, fres) + spec * 0.7;
-        let fog = 1.0 - exp(-t * 0.015);
+        let fog = 1.0 - exp(-t * FOG_DENSITY_WATER);
         col = mix(lit, col, fog);
     }
 

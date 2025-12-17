@@ -4,6 +4,7 @@ mod terrain;
 mod water;
 
 use bevy::prelude::*;
+use bevy::log::{Level, LogPlugin};
 use bevy::sprite::{Material2dPlugin, MaterialMesh2dBundle};
 use bevy::window::PrimaryWindow;
 
@@ -14,14 +15,23 @@ use crate::water::WaterParticles;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "burv — voxel raymarch demo".to_string(),
-                resolution: (1280.0, 720.0).into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: "burv — voxel raymarch demo".to_string(),
+                        resolution: (1280.0, 720.0).into(),
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(LogPlugin {
+                    level: Level::INFO,
+                    filter: "wgpu=error,naga=warn,bevy_window=warn,bevy_winit::state=error"
+                        .to_string(),
+                    ..default()
+                }),
+        )
         .add_plugins(Material2dPlugin::<RaymarchMaterial>::default())
         .add_systems(Startup, setup)
         .add_systems(
