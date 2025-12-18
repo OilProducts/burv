@@ -337,15 +337,126 @@ fn clamp_to_sim_bounds(sim_min: Vec3, sim_max: Vec3, p: &mut Vec3) {
 }
 
 fn push_out_of_terrain(terrain: &Terrain, radius: f32, sim_max_y: f32, p: &mut Vec3) {
-    let floor_y = (terrain.height_at(p.x, p.z) + 1.0 + radius).min(sim_max_y - 1.0e-4);
-    if p.y >= floor_y {
-        return;
-    }
+    // The terrain is a voxelized heightfield. If we only push based on the height directly under the
+    // particle's center, particles can overlap vertical faces at column boundaries (their radius
+    // extends into a neighboring solid column). That overlap shows up as a hard "slice" in the
+    // raymarcher because terrain voxels occlude the water SDF.
+    //
+    // Resolve by pushing the sphere out of any solid voxels it overlaps.
+    let world_min = terrain.world_min;
+    let world_max = terrain.world_min + Vec3::splat(terrain.world_size);
 
-    let penetration_y = floor_y - p.y;
-    let n = terrain_height_normal(terrain, p.x, p.z);
-    let denom = n.y.max(0.2);
-    *p += n * (penetration_y / denom);
+    let vx_min = world_min.x as i32;
+    let vy_min = world_min.y as i32;
+    let vz_min = world_min.z as i32;
+    let vx_max = world_max.x as i32;
+    let vy_max = world_max.y as i32;
+    let vz_max = world_max.z as i32;
+
+    let r = radius.max(0.0);
+    let r2 = r * r;
+    let pad = 1.0e-4;
+
+    let max_iters = 6;
+    for _ in 0..max_iters {
+        let mut moved = false;
+
+        let bmin = *p - Vec3::splat(r + pad);
+        let bmax = *p + Vec3::splat(r + pad);
+
+        let mut x0 = bmin.x.floor() as i32;
+        let mut x1 = bmax.x.floor() as i32;
+        let mut y0 = bmin.y.floor() as i32;
+        let mut y1 = bmax.y.floor() as i32;
+        let mut z0 = bmin.z.floor() as i32;
+        let mut z1 = bmax.z.floor() as i32;
+
+        x0 = x0.clamp(vx_min, vx_max - 1);
+        x1 = x1.clamp(vx_min, vx_max - 1);
+        y0 = y0.clamp(vy_min, vy_max - 1);
+        y1 = y1.clamp(vy_min, vy_max - 1);
+        z0 = z0.clamp(vz_min, vz_max - 1);
+        z1 = z1.clamp(vz_min, vz_max - 1);
+
+        for z in z0..=z1 {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    // Heightfield voxel occupancy: solid for y <= h(x, z).
+                    let h = terrain.height_at(x as f32, z as f32) as i32;
+                    if y > h {
+                        continue;
+                    }
+
+                    let box_min = Vec3::new(x as f32, y as f32, z as f32);
+                    let box_max = box_min + Vec3::ONE;
+                    let closest = Vec3::new(
+                        p.x.clamp(box_min.x, box_max.x),
+                        p.y.clamp(box_min.y, box_max.y),
+                        p.z.clamp(box_min.z, box_max.z),
+                    );
+                    let d = *p - closest;
+                    let dist2 = d.length_squared();
+                    if dist2 >= r2 {
+                        continue;
+                    }
+
+                    moved = true;
+
+                    if dist2 > 1.0e-10 {
+                        // Standard sphere-vs-AABB separation.
+                        let dist = dist2.sqrt();
+                        *p += d * ((r - dist) / dist);
+                    } else {
+                        // Center is inside the voxel AABB. Choose an outward axis (never downward)
+                        // with minimal translation.
+                        let dx0 = p.x - box_min.x;
+                        let dx1 = box_max.x - p.x;
+                        let dy1 = box_max.y - p.y;
+                        let dz0 = p.z - box_min.z;
+                        let dz1 = box_max.z - p.z;
+
+                        let mut best = Vec3::ZERO;
+                        let mut best_len = f32::INFINITY;
+
+                        let push_x0 = dx0 + r;
+                        if push_x0 < best_len {
+                            best_len = push_x0;
+                            best = Vec3::new(-push_x0, 0.0, 0.0);
+                        }
+                        let push_x1 = dx1 + r;
+                        if push_x1 < best_len {
+                            best_len = push_x1;
+                            best = Vec3::new(push_x1, 0.0, 0.0);
+                        }
+                        let push_z0 = dz0 + r;
+                        if push_z0 < best_len {
+                            best_len = push_z0;
+                            best = Vec3::new(0.0, 0.0, -push_z0);
+                        }
+                        let push_z1 = dz1 + r;
+                        if push_z1 < best_len {
+                            best_len = push_z1;
+                            best = Vec3::new(0.0, 0.0, push_z1);
+                        }
+                        let push_y1 = dy1 + r;
+                        if push_y1 < best_len {
+                            best = Vec3::new(0.0, push_y1, 0.0);
+                        }
+
+                        *p += best;
+                    }
+
+                    // Keep the particle center in-bounds; the caller also clamps, but avoid
+                    // generating NaNs/inf if something goes very wrong.
+                    p.y = p.y.min(sim_max_y - 1.0e-4);
+                }
+            }
+        }
+
+        if !moved {
+            break;
+        }
+    }
 }
 
 fn terrain_height_normal(terrain: &Terrain, x: f32, z: f32) -> Vec3 {

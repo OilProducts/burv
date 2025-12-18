@@ -144,11 +144,21 @@ fn smin(a: f32, b: f32, k: f32) -> f32 {
     return mix(b, a, h) - k * h * (1.0 - h);
 }
 
+fn dist_to_aabb(p: vec3<f32>, bmin: vec3<f32>, bmax: vec3<f32>) -> f32 {
+    // Euclidean distance from point to axis-aligned box (0 when inside).
+    let q = max(max(bmin - p, p - bmax), vec3<f32>(0.0));
+    return length(q);
+}
+
 fn water_sdf(p: vec3<f32>) -> f32 {
     let bmin = params.water_bounds_min_radius.xyz;
     let bmax = params.water_bounds_max_pad.xyz;
-    if !in_bounds(p, bmin, bmax) {
-        return 1.0e9;
+    // When outside the bounds, return a conservative lower bound on the distance to any water.
+    // Returning a huge number here can cause the ray marcher to take a large "voxel leaf exit"
+    // step and completely skip over nearby water if it's contained within a large empty leaf.
+    let d_bounds = dist_to_aabb(p, bmin, bmax);
+    if d_bounds > 0.0 {
+        return d_bounds;
     }
 
     let r = params.water_bounds_min_radius.w;
